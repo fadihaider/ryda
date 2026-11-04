@@ -1,6 +1,6 @@
 import { existsSync, readFileSync } from "node:fs";
 import { describe, expect, test } from "vitest";
-import { parseFit } from "./fit";
+import { normalise, parseFit, type FitRecord } from "./fit";
 import { estimatePower } from "@/lib/analysis/power";
 import { computeRideMetrics, elevationGain, totalAscent } from "@/lib/analysis/metrics";
 import { DEFAULT_PROFILE } from "@/lib/analysis/types";
@@ -210,5 +210,33 @@ suite("parseFit against a real device file", () => {
     // The whole point of holding gaps: moving time must not drift toward elapsed.
     expect(metrics.movingSeconds).toBeLessThan(elapsed);
     expect(Math.abs(metrics.movingSeconds - timer) / timer).toBeLessThan(0.25);
+  });
+});
+
+describe("normalise before the first GPS fix", () => {
+  // A head unit starts recording before it has a fix or an altitude. Seeding
+  // with zero drew a line from 0°N 0°E across the Atlantic and turned the first
+  // real altitude into a one-second 30 m climb.
+  const t0 = Date.parse("2026-08-15T14:00:42Z");
+  const records: FitRecord[] = [
+    { timestamp: new Date(t0), distance: 0 },
+    { timestamp: new Date(t0 + 1000), distance: 0 },
+    { timestamp: new Date(t0 + 2000), distance: 0, altitude: 20.8 },
+    { timestamp: new Date(t0 + 3000), distance: 2, altitude: 20.6, position_lat: 45.497, position_long: -73.553 },
+    { timestamp: new Date(t0 + 4000), distance: 6, altitude: 20.6, position_lat: 45.4971, position_long: -73.553 },
+  ];
+
+  test("holds the first fix rather than inventing 0°N 0°E", () => {
+    const { streams } = normalise(records, {}, []);
+    for (let i = 0; i < streams.time.length; i++) {
+      expect(streams.latlng![i * 2]).toBeGreaterThan(45);
+      expect(streams.latlng![i * 2 + 1]).toBeLessThan(-73);
+    }
+  });
+
+  test("holds the first altitude rather than starting at 0 m", () => {
+    const { streams } = normalise(records, {}, []);
+    expect(streams.altitude[0]).toBeCloseTo(20.8);
+    expect(streams.altitude[1]).toBeCloseTo(20.8);
   });
 });

@@ -208,10 +208,17 @@ export function normalise(
 
   let gapSeconds = 0;
   let cursor = 0;
+  // Seeded from the first record that carries each value, not from the first
+  // record. A head unit starts recording before it has a GPS fix or an
+  // altitude, and seeding with zero put the opening seconds at 0°N 0°E — a
+  // line across the Atlantic on the map — and at 0 m, so the first real
+  // altitude read as a 30 m climb in one second and a 2,000 W spike.
+  const firstFix = records.find((r) => r.position_lat != null && r.position_long != null);
+  const firstAltitude = records.map(altitudeOf).find((a) => a != null);
   let lastDistance = records[0].distance ?? 0;
-  let lastAltitude = altitudeOf(records[0]) ?? 0;
-  let lastLat = records[0].position_lat ?? 0;
-  let lastLng = records[0].position_long ?? 0;
+  let lastAltitude = firstAltitude ?? 0;
+  let lastLat = firstFix?.position_lat ?? 0;
+  let lastLng = firstFix?.position_long ?? 0;
 
   for (let i = 0; i < n; i++) {
     const t = t0 + i;
