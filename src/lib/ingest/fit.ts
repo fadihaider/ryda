@@ -18,7 +18,7 @@ import type { AltitudeSource, RideMeta, RideStreams } from "@/lib/analysis/types
  *    speed cubed is power.
  */
 
-interface FitRecord {
+export interface FitRecord {
   timestamp?: string | Date;
   position_lat?: number;
   position_long?: number;
@@ -33,7 +33,7 @@ interface FitRecord {
   temperature?: number;
 }
 
-interface FitSession {
+export interface FitSession {
   sport?: string;
   sub_sport?: string;
   start_time?: string | Date;
@@ -172,8 +172,12 @@ function coalesceBySecond(records: FitRecord[]): FitRecord[] {
 /**
  * Resample onto a uniform 1 Hz grid spanning the ride, carrying values forward
  * across gaps and holding distance so stops read as stationary.
+ *
+ * Exported because it is not FIT-specific: anything that can be expressed as
+ * timestamped records — Strava's API streams included — goes through the same
+ * gap handling, so a ride does not score differently by how it arrived.
  */
-function normalise(
+export function normalise(
   records: FitRecord[],
   session: FitSession,
   devices: string[],

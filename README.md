@@ -7,8 +7,9 @@ layer that should sit on top of them: estimated power modelled from physics,
 training load that survives scrutiny, a route you can scrub, and a fitness curve
 built from your whole history.
 
-It reads your files. It does not talk to the Strava API, for reasons that turned
-out to be non-negotiable — see [Why files, not the API](#why-files-not-the-api).
+It reads your files, and it syncs from the Strava API. The API sync breaks
+Strava's API Policy, and that was decided knowingly for a private, single-user
+deployment — see [Strava: files, and the API](#strava-files-and-the-api).
 
 ---
 
@@ -17,6 +18,7 @@ out to be non-negotiable — see [Why files, not the API](#why-files-not-the-api
 **Working**
 
 - Import `.fit`, `.gpx` and `.tcx`, gzipped or not, straight from a Strava bulk export
+- Strava sync on the server — a webhook for new rides, a daily job and an account-page button for the history backfill. A file always replaces Strava's copy of the same ride
 - Ride screen — route map coloured by any channel, synchronised charts, scrub, drag-select a range and every statistic recomputes for it
 - Time in power and heart-rate zones, and a W′ balance trace
 - Library — bulk import, deduplication, delete, recompute
@@ -60,7 +62,7 @@ wired up.
 | script | |
 |---|---|
 | `npm run dev` | dev server |
-| `npm test` | unit tests (78) |
+| `npm test` | unit tests (118) |
 | `npm run audit:power -- <strava-export-dir>` | cross-check the estimator against Strava's own |
 | `npm run db:migrate` | apply migrations (reads `.env.local`) |
 | `npm run typecheck` | `tsc --noEmit` |
@@ -71,30 +73,64 @@ wired up.
 
 ---
 
-## Why files, not the API
+## Strava: files, and the API
 
-Strava's API Policy, effective 1 June 2026, makes an API-backed version of this
-app impossible to build honestly:
+Ryda started file-only, because Strava's API Policy (effective 1 June 2026)
+forbids what this app does with API data. It now also syncs from the API
+anyway. This section records the decision and what it costs.
 
-| clause | text | consequence |
+| clause | text | what the sync does |
 |---|---|---|
-| §6.2 | "You may not retain Strava Data in your cache for longer than seven (7) days." | A multi-year fitness trend is not permitted. |
-| §5.5 | "You may not bulk-export Strava Data, including by accumulating Strava Data through repeated authorized API calls into a corpus, dataset, archive, or database…" | Backfilling your history is not permitted. |
-| §5.4 | "You may not process … Strava Data … for the purposes of analytics, analyses…" | The category itself, read literally. |
-| §6.6 | "Each Strava user has the right to access and export the user's own Strava data, free of charge… Nothing in this Agreement is intended to limit or condition that user-facing right." | **The way through.** |
+| §6.2 | "You may not retain Strava Data in your cache for longer than seven (7) days." | Keeps rides permanently. |
+| §5.5 | "You may not bulk-export Strava Data, including by accumulating Strava Data through repeated authorized API calls into a corpus, dataset, archive, or database…" | Backfills the whole history into Postgres. |
+| §5.4 | "You may not process … Strava Data … for the purposes of analytics, analyses…" | It is an analysis app. |
 
-The Agreement (§2.3(i)) defines "Strava Data" as data *collected from the Strava
-API Materials*. A bulk export is not — it is your data, exercised as a
-data-subject right, and §6.6 explicitly declines to condition it.
+A Strava subscription doesn't change any of this. It is a *requirement* for
+Standard Tier API access (§3.3), not an exemption, and none of the clauses
+above has a subscriber exception.
 
-Files are also simply better. A `.fit` from a head unit carries barometric
-altitude, true 1 Hz sampling and cadence; an API round-trip only loses
-information.
+**Why do it anyway:** this is a private deployment for one rider, reading that
+rider's own activities. **The risk:** Strava can revoke the application's API
+access. If that happens, rides already stored stay, and the file path below
+still works — the sync only adds to it.
+
+**Files still win.** A `.fit` from a head unit carries barometric altitude, true
+1 Hz sampling and cadence; the API returns Strava's rendering of it (its speed
+is a smoothed series, labelled derived here). So:
+
+- a ride imported from a file is never overwritten by Strava's copy, and
+  importing the file later replaces the copy;
+- nothing that happens on Strava — a delete, a retag to Walk — removes a file
+  ride. Renames do carry over, and Strava's name is adopted when a file ride is
+  first matched to its activity;
+- matching is by start time and duration within two minutes, not by id, because
+  the two sources round either side of a minute boundary often enough to matter.
+
+The bulk export (§6.6: "Each Strava user has the right to access and export the
+user's own Strava data, free of charge…") remains the policy-clean way in.
 
 [intervals.icu](https://intervals.icu) was evaluated as an alternative source and
 rejected on two counts, both from its author: it does not estimate power for
 rides without a meter, and Strava-sourced activities are not served through its
 API at all.
+
+### How the sync runs
+
+```
+Strava ──webhook──▶ /api/strava/webhook ─┐
+daily cron ───────▶ /api/cron/strava ────┼─▶ strava_activities (queue) ─▶ streams ─▶ rides + ride_streams
+account page ─────▶ /api/strava/sync ────┘                                               │
+                                                     browsers and the iOS app ◀── existing sync
+```
+
+Reads are capped at 100 per 15 minutes and 1,000 a day. Listing costs one
+request per 200 activities and each ride costs one more for its streams, so the
+history is listed in full first and `strava_activities` becomes the work queue.
+Walks are settled at listing time and never cost a request. The client stops a
+few requests short of each limit and records when it may resume; new rides jump
+the backfill queue. The daily job (Hobby crons run once a day) does about 90
+rides a night; the account page's button runs batches back to back while it is
+open.
 
 ---
 
@@ -216,9 +252,12 @@ season, and it is what a native app reads.
 
 ```
 browser  ──push summary + streams──▶  Postgres  ──▶  GET /api/summary  ──▶  iOS widget
-   ▲                                     │
-   └──────────pull, then re-analyse──────┘
+   ▲                                     │  ▲
+   └──────────pull, then re-analyse──────┘  └── Strava sync (server-side)
 ```
+
+Rides the server fetched from Strava are the server's to manage: a browser
+never uploads one back, and drops its copy when the server no longer has it.
 
 Rides pulled down are re-analysed locally rather than trusted from the wire: the
 rider's mass and threshold live on the device, and the model itself changes.
@@ -266,7 +305,7 @@ the module worker rejects the MIME type, and the map silently never loads.
 npm test
 ```
 
-72 tests. The interesting ones are regressions pinning bugs that failed
+118 tests. The interesting ones are regressions pinning bugs that failed
 *silently* and produced plausible numbers:
 
 - Raw altitude summing reports 770 m of climbing on a ride with 22 m of relief
@@ -294,6 +333,12 @@ and the phone together. Sign-in returns the bearer token.
 | `DELETE /api/rides?id=` | 404s if it isn't yours |
 | `GET /api/rides/:id/streams` | base64 sample channels |
 | `GET /api/summary` | fitness, fatigue, form, ramp rate, last ride |
+| `GET /api/strava/connect` | start Strava authorisation (browser redirect) |
+| `GET /api/strava/status` | connection and backfill progress |
+| `POST /api/strava/sync` | run one batch now (≤45 s) |
+| `POST /api/strava/disconnect` | revoke tokens; stored rides are kept |
+| `GET,POST /api/strava/webhook` | Strava's push subscription callback (no auth) |
+| `GET /api/cron/strava` | daily job; `Authorization: Bearer $CRON_SECRET` |
 
 `/api/summary` exists because a widget is woken by the OS on a budget, cannot
 page through endpoints, and has no room for a spinner. It is also why the
@@ -316,8 +361,22 @@ vercel env add BETTER_AUTH_URL production      # https://<your-domain>
 npm run db:migrate
 ```
 
-Deployment protection is on. It can come off once accounts are in use, but until
-then it is the only thing standing in front of the database.
+Strava sync additionally needs an API application from
+<https://www.strava.com/settings/api>, with its Authorization Callback Domain
+set to the production domain (`localhost` is always allowed), and:
+
+```bash
+vercel env add STRAVA_CLIENT_ID production
+vercel env add STRAVA_CLIENT_SECRET production
+vercel env add STRAVA_VERIFY_TOKEN production    # openssl rand -hex 16
+vercel env add CRON_SECRET production            # openssl rand -hex 16
+# after deploying, once:
+node --env-file=.env.local scripts/strava-subscribe.mjs https://<your-domain>
+vercel env add STRAVA_SUBSCRIPTION_ID production # the id it printed
+```
+
+The webhook must be reachable without authentication, so deployment protection
+has to stay off. Every ride route still requires a session.
 
 ---
 

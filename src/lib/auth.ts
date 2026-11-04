@@ -11,8 +11,8 @@ import { db, schema } from "@/db";
  * recommending Better Auth for new projects. Sessions live in our database,
  * which also gives immediate revocation.
  *
- * Email and password only. There is no third-party provider to connect —
- * rides arrive as files — so an OAuth dependency would buy nothing.
+ * Email and password only. Strava is connected separately, for sync, and is
+ * not a way to sign in — an OAuth sign-in dependency would buy nothing.
  */
 export const auth = betterAuth({
   database: drizzleAdapter(db, {

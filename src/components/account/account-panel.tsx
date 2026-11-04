@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 import { signIn, signOut, signUp, useSession } from "@/lib/auth-client";
+import { StravaPanel } from "./strava-panel";
 import { SyncPanel } from "./sync-panel";
 
 /**
@@ -40,6 +41,7 @@ export function AccountPanel() {
             </button>
           </div>
           <SyncPanel />
+          <StravaPanel />
         </>
       ) : (
         <SignInForm />

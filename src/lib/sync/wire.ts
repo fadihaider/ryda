@@ -64,6 +64,10 @@ export interface WireRide {
   kilojoules?: number;
   /** Dietary calories, from that work and a gross-efficiency assumption. */
   calories?: number;
+  /** "file" or "strava" — where the samples came from. Set by the server. */
+  source?: string;
+  /** The matching Strava activity, when there is one. Set by the server. */
+  stravaActivityId?: number | null;
 }
 
 function toBase64(view: ArrayBufferView): string {

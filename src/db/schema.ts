@@ -1,4 +1,5 @@
 import {
+  bigint,
   boolean,
   customType,
   doublePrecision,
@@ -157,6 +158,21 @@ export const rides = pgTable(
     /** Pathname of the original file in the private Blob store, when kept. */
     blobPath: text("blob_path"),
 
+    /**
+     * Where the samples came from: "file" for an imported .fit/.gpx/.tcx,
+     * "strava" for streams fetched from the Strava API.
+     *
+     * The file always wins. A head unit's file carries its own barometric
+     * altitude and true 1 Hz sampling; the API returns Strava's rendering of
+     * it. So a Strava-sourced ride is replaced the moment the file arrives,
+     * and nothing Strava does — an edit, a delete — may destroy a file ride.
+     */
+    source: text("source").notNull().default("file"),
+    /** The Strava activity this ride corresponds to, whichever source supplied
+     *  the samples. Drives "View on Strava" and lets renames and deletes find
+     *  the ride. */
+    stravaActivityId: bigint("strava_activity_id", { mode: "number" }),
+
     importedAt: timestamp("imported_at").notNull().defaultNow(),
     updatedAt: timestamp("updated_at").notNull().defaultNow(),
   },
@@ -165,6 +181,7 @@ export const rides = pgTable(
     // The library and trend both read a user's rides newest-first.
     index("rides_user_started_idx").on(t.userId, t.startedAt),
     index("rides_user_date_idx").on(t.userId, t.localDate),
+    uniqueIndex("rides_user_strava_idx").on(t.userId, t.stravaActivityId),
   ],
 );
 
@@ -231,5 +248,76 @@ export const shareLinks = pgTable(
       columns: [t.userId, t.rideId],
       foreignColumns: [rides.userId, rides.id],
     }).onDelete("cascade"),
+  ],
+);
+
+// ---------------------------------------------------------------------------
+// Strava
+// ---------------------------------------------------------------------------
+
+/**
+ * One rider's Strava authorisation.
+ *
+ * Tokens are stored as Strava issues them. Refreshing returns a new refresh
+ * token and invalidates the old one immediately, so the row must be rewritten
+ * on every refresh or the connection is lost at the next one.
+ */
+export const stravaConnections = pgTable("strava_connections", {
+  userId: text("user_id")
+    .primaryKey()
+    .references(() => user.id, { onDelete: "cascade" }),
+  athleteId: bigint("athlete_id", { mode: "number" }).notNull().unique(),
+  accessToken: text("access_token").notNull(),
+  refreshToken: text("refresh_token").notNull(),
+  expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+  scope: text("scope").notNull(),
+  /** Next page of the athlete's activity list to read during backfill. */
+  listPage: integer("list_page").notNull().default(1),
+  /** True once the whole history has been listed (not necessarily imported). */
+  listComplete: boolean("list_complete").notNull().default(false),
+  /** Set after a 429 or when the read budget is spent; work waits until then. */
+  pausedUntil: timestamp("paused_until", { withTimezone: true }),
+  lastRunAt: timestamp("last_run_at", { withTimezone: true }),
+  createdAt: timestamp("created_at").notNull().defaultNow(),
+  updatedAt: timestamp("updated_at").notNull().defaultNow(),
+});
+
+/**
+ * Every Strava activity seen for a rider, and what became of it.
+ *
+ * Listing is cheap — two hundred activities per request — and fetching streams
+ * is one request per ride, so the history is listed in full first and this
+ * table becomes the work queue. It is also what makes progress reportable as
+ * "312 of 540" rather than a spinner.
+ *
+ * state: pending | imported | linked (a file ride already covered it) |
+ *        skipped (not cycling, or nothing analysable) | failed
+ */
+export const stravaActivities = pgTable(
+  "strava_activities",
+  {
+    userId: text("user_id")
+      .notNull()
+      .references(() => user.id, { onDelete: "cascade" }),
+    activityId: bigint("activity_id", { mode: "number" }).notNull(),
+    name: text("name").notNull(),
+    sportType: text("sport_type").notNull(),
+    startedAt: timestamp("started_at", { withTimezone: true }).notNull(),
+    /** Strava's local wall-clock date, YYYY-MM-DD. */
+    localDate: text("local_date").notNull(),
+    elapsedSeconds: integer("elapsed_seconds").notNull(),
+    deviceName: text("device_name"),
+    /** From a power meter, rather than Strava's own estimate. */
+    deviceWatts: boolean("device_watts").notNull().default(false),
+    /** New rides jump the backfill queue, so today's ride is not stuck behind 2019. */
+    priority: integer("priority").notNull().default(0),
+    state: text("state").notNull().default("pending"),
+    attempts: integer("attempts").notNull().default(0),
+    error: text("error"),
+    updatedAt: timestamp("updated_at").notNull().defaultNow(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.userId, t.activityId] }),
+    index("strava_activities_queue_idx").on(t.userId, t.state, t.priority, t.startedAt),
   ],
 );

@@ -116,7 +116,8 @@ export function SyncPanel() {
 
       {result ? (
         <p className="mt-3 text-[12px] text-ink-secondary">
-          Uploaded {result.pushed}, updated {result.updated}, downloaded {result.pulled}.
+          Uploaded {result.pushed}, updated {result.updated}, downloaded {result.pulled}
+          {result.removed > 0 ? `, removed ${result.removed} Strava copies` : ""}.
           {result.failed.length > 0 ? (
             <span style={{ color: "var(--status-warning)" }}>
               {" "}

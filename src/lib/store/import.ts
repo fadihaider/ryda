@@ -114,6 +114,11 @@ export async function recomputeAll(
       const curve = buildPowerCurve(watts).watts;
       await saveRide({
         curve,
+        // Re-deriving numbers must not change where the samples came from.
+        origin: {
+          source: summary.source ?? "file",
+          stravaActivityId: summary.stravaActivityId ?? null,
+        },
         ride: {
           streams: stored.streams,
           meta: stored.meta,
@@ -164,7 +169,7 @@ export interface ImportOutcome {
 }
 
 /** Below this a file has no ride in it, whatever its headers claim. */
-const MIN_ANALYSABLE_METRES = 300;
+export const MIN_ANALYSABLE_METRES = 300;
 
 /** Thrown when a ride carries no usable distance — e.g. a strap-only recording. */
 export class NoRideDataError extends Error {

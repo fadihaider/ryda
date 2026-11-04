@@ -54,6 +54,8 @@ export interface RideViewProps {
    * where everything computed here is mechanical work at the pedals.
    */
   reportedCalories?: number | null;
+  /** The matching Strava activity, for a link back to it. */
+  stravaActivityId?: number | null;
 }
 
 export function RideView({
@@ -62,6 +64,7 @@ export function RideView({
   name,
   startedAt,
   reportedCalories,
+  stravaActivityId,
 }: RideViewProps) {
   const [xIsDistance, setXIsDistance] = useState(false);
   const [mapChannel, setMapChannel] = useState<ChannelKey>("power");
@@ -149,6 +152,19 @@ export function RideView({
           <h1 className="text-xl font-medium tracking-tight text-ink">{name}</h1>
           <p className="mt-1 text-[13px] text-ink-muted">
             {formatDate(startedAt)}
+            {stravaActivityId ? (
+              <>
+                {" · "}
+                <a
+                  href={`https://www.strava.com/activities/${stravaActivityId}`}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="font-medium text-[#FC5200] underline-offset-4 hover:underline"
+                >
+                  View on Strava
+                </a>
+              </>
+            ) : null}
             {selection ? (
               <>
                 {" · "}

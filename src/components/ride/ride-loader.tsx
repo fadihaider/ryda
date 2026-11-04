@@ -13,6 +13,7 @@ interface Loaded {
   name: string;
   startedAt: string;
   reportedCalories: number | null;
+  stravaActivityId: number | null;
 }
 
 /**
@@ -45,6 +46,7 @@ export function RideLoader() {
         name: summary.name,
         startedAt: summary.startedAt,
         reportedCalories: summary.reportedCalories,
+        stravaActivityId: summary.stravaActivityId ?? null,
       });
     })();
     return () => {
@@ -65,6 +67,7 @@ export function RideLoader() {
       name={ride.name}
       startedAt={ride.startedAt}
       reportedCalories={ride.reportedCalories}
+      stravaActivityId={ride.stravaActivityId}
     />
   );
 }

@@ -50,6 +50,11 @@ export interface RideSummary {
   decouplingPercent: number | null;
   confidence: string;
   importedAt: string;
+  /** "strava" when the server fetched the samples from Strava; absent or
+   *  "file" for anything imported from a file. */
+  source?: "file" | "strava";
+  /** The matching Strava activity, when there is one. */
+  stravaActivityId?: number | null;
 }
 
 interface StreamRecord {
@@ -144,6 +149,11 @@ export function toLocalDate(iso: string): string {
 
 export interface SaveRideInput {
   ride: ParsedRide;
+  /**
+   * Where the ride came from. Omitted for a file import, which is recorded as
+   * "file" while keeping any Strava link the replaced copy had.
+   */
+  origin?: { source: "file" | "strava"; stravaActivityId: number | null };
   /** Cached mean-maximal power curve for this ride. */
   curve?: Float32Array;
   summary: Omit<
@@ -158,6 +168,8 @@ export interface SaveRideInput {
     | "hasMeasuredPower"
     | "devices"
     | "importedAt"
+    | "source"
+    | "stravaActivityId"
   >;
 }
 
@@ -167,7 +179,7 @@ export interface SaveResult {
   replaced: boolean;
 }
 
-export async function saveRide({ ride, summary, curve }: SaveRideInput): Promise<SaveResult> {
+export async function saveRide({ ride, summary, curve, origin }: SaveRideInput): Promise<SaveResult> {
   const db = await openDb();
   const id = rideId(ride.startedAt, summary.durationSeconds);
 
@@ -188,6 +200,8 @@ export async function saveRide({ ride, summary, curve }: SaveRideInput): Promise
         hasMeasuredPower: ride.hasMeasuredPower,
         devices: ride.devices,
         importedAt: existing?.importedAt ?? new Date().toISOString(),
+        source: origin?.source ?? "file",
+        stravaActivityId: origin ? origin.stravaActivityId : (existing?.stravaActivityId ?? null),
       };
 
       rides.put(row);
@@ -245,6 +259,23 @@ export async function listCurves(): Promise<DatedCurve[]> {
     return await tx(db, [CURVES], "readonly", (t) =>
       wrap<DatedCurve[]>(t.objectStore(CURVES).getAll()),
     );
+  } finally {
+    db.close();
+  }
+}
+
+/** Change a stored ride's descriptive fields without touching its samples. */
+export async function updateRideDetails(
+  id: string,
+  patch: Partial<Pick<RideSummary, "name" | "stravaActivityId">>,
+): Promise<void> {
+  const db = await openDb();
+  try {
+    await tx(db, [RIDES], "readwrite", async (t) => {
+      const rides = t.objectStore(RIDES);
+      const existing = await wrap<RideSummary | undefined>(rides.get(id));
+      if (existing) rides.put({ ...existing, ...patch });
+    });
   } finally {
     db.close();
   }

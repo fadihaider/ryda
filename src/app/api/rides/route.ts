@@ -3,6 +3,7 @@ import { db, schema } from "@/db";
 import { requireUser } from "@/lib/auth";
 import { decodeStreams, type WireRide, type WireStreams } from "@/lib/sync/wire";
 import { energyFor, kilojoulesFrom } from "@/lib/analysis/metrics";
+import { supersedeStravaCopies, writeRide } from "@/lib/rides/server-store";
 
 /**
  * A rider's rides.
@@ -111,42 +112,21 @@ export async function POST(request: Request) {
     reportedCalories: ride.reportedCalories ?? null,
     decouplingPercent: ride.decouplingPercent,
     confidence: ride.confidence,
+    // Anything uploaded with samples came from a file on a device. Strava
+    // copies are only ever written by the server itself.
+    source: "file",
     updatedAt: new Date(),
   };
 
-  // Conflict target is the composite key: a ride id is only unique within an
-  // account, so targeting id alone would let one rider's upload overwrite
-  // another's ride when they rode together.
-  await db
-    .insert(schema.rides)
-    .values(values)
-    .onConflictDoUpdate({ target: [schema.rides.userId, schema.rides.id], set: values });
+  await writeRide(values, decoded.streams);
 
-  const buffers = {
-    rideId: ride.id,
-    userId: user.id,
-    sampleCount: decoded.meta.n,
-    // time, distance and altitude are required by the schema; decodeStreams
-    // guarantees them for any payload that got past the length check above.
-    time: toBuffer(decoded.streams.time)!,
-    distance: toBuffer(decoded.streams.distance)!,
-    altitude: toBuffer(decoded.streams.altitude)!,
-    latlng: toBuffer(decoded.streams.latlng),
-    speed: toBuffer(decoded.streams.speed),
-    heartrate: toBuffer(decoded.streams.heartrate),
-    cadence: toBuffer(decoded.streams.cadence),
-    power: toBuffer(decoded.streams.power),
-    temperature: toBuffer(decoded.streams.temperature),
-    paused: toBuffer(decoded.streams.paused),
-  };
-
-  await db
-    .insert(schema.rideStreams)
-    .values(buffers)
-    .onConflictDoUpdate({
-      target: [schema.rideStreams.userId, schema.rideStreams.rideId],
-      set: buffers,
-    });
+  // A file has arrived. If sync already stored Strava's copy of this ride under
+  // a neighbouring id, it goes now; the file is the better record of it.
+  await supersedeStravaCopies(user.id, {
+    id: values.id,
+    startedAt: values.startedAt,
+    durationSeconds: values.durationSeconds,
+  });
 
   return Response.json({ id: ride.id }, { status: 200 });
 }
@@ -199,11 +179,6 @@ function summaryOnly(ride: WireRide) {
   };
 }
 
-function toBuffer(view: ArrayBufferView | undefined): Uint8Array | null {
-  if (!view) return null;
-  return new Uint8Array(view.buffer as ArrayBuffer, view.byteOffset, view.byteLength);
-}
-
 export function toWire(row: typeof schema.rides.$inferSelect): WireRide {
   return {
     id: row.id,
@@ -233,6 +208,8 @@ export function toWire(row: typeof schema.rides.$inferSelect): WireRide {
     // this to decide what to push; a field the server accepts but never returns
     // reads as permanently unsynced, and every sync re-uploads it forever.
     reportedCalories: row.reportedCalories,
+    source: row.source,
+    stravaActivityId: row.stravaActivityId,
   };
 }
 

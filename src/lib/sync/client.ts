@@ -1,10 +1,13 @@
 import { buildPowerCurve } from "@/lib/analysis/curve";
 import { estimatePower } from "@/lib/analysis/power";
 import { toProfile, type RiderSettings } from "@/lib/rider-settings";
+import { isSameRide } from "@/lib/rides/match";
 import {
+  deleteRide,
   getStreams,
   listRides,
   saveRide,
+  updateRideDetails,
   type RideSummary,
 } from "@/lib/store/rides";
 import { decodeStreams, encodeStreams, type WireRide, type WireStreams } from "./wire";
@@ -22,6 +25,11 @@ import { differs } from "./diff";
  * Two devices that import the same file independently converge on the same row
  * rather than two, and there is nothing to merge because a ride is immutable
  * once recorded.
+ *
+ * Rides the server fetched from Strava follow two extra rules. The server is
+ * authoritative for them — one missing there was deleted or replaced, and goes
+ * here too rather than being uploaded back — and a file for the same ride
+ * always replaces them, on the server as well as here.
  */
 
 export interface SyncProgress {
@@ -36,6 +44,8 @@ export interface SyncResult {
   /** Rides already on the server whose numbers had changed here. */
   updated: number;
   pulled: number;
+  /** Strava copies removed here because the server no longer has them. */
+  removed: number;
   failed: { id: string; reason: string }[];
 }
 
@@ -84,14 +94,42 @@ export async function sync(
   settings: RiderSettings,
   onProgress?: (progress: SyncProgress) => void,
 ): Promise<SyncResult> {
-  const [local, remote] = await Promise.all([listRides(), fetchRemoteRides()]);
-  const localIds = new Set(local.map((r) => r.id));
+  const [listed, remote] = await Promise.all([listRides(), fetchRemoteRides()]);
   const remoteIds = new Set(remote.map((r) => r.id));
-
-  const result: SyncResult = { pushed: 0, updated: 0, pulled: 0, failed: [] };
   const byId = new Map(remote.map((r) => [r.id, r]));
+  const result: SyncResult = { pushed: 0, updated: 0, pulled: 0, removed: 0, failed: [] };
 
-  const toPush = local.filter((r) => !remoteIds.has(r.id));
+  // A Strava copy the server no longer holds was deleted on Strava, retagged
+  // as something other than a ride, or replaced by a file. Uploading it back
+  // would resurrect it as if it were a file.
+  const local: RideSummary[] = [];
+  for (const r of listed) {
+    if (r.source === "strava" && !remoteIds.has(r.id)) {
+      await deleteRide(r.id);
+      result.removed++;
+    } else {
+      local.push(r);
+    }
+  }
+  const localIds = new Set(local.map((r) => r.id));
+  const localFiles = local.filter((r) => r.source !== "strava");
+
+  // Name and link follow the server for anything tied to a Strava activity,
+  // so a rename on Strava is not pushed straight back as the old name.
+  for (const r of local) {
+    const there = byId.get(r.id);
+    if (!there?.stravaActivityId) continue;
+    if (r.name !== there.name || r.stravaActivityId !== there.stravaActivityId) {
+      await updateRideDetails(r.id, { name: there.name, stravaActivityId: there.stravaActivityId });
+      r.name = there.name;
+      r.stravaActivityId = there.stravaActivityId;
+    }
+  }
+
+  // Files the server lacks, plus files whose server copy is still Strava's.
+  const toPush = localFiles.filter(
+    (r) => !remoteIds.has(r.id) || byId.get(r.id)?.source === "strava",
+  );
   for (let i = 0; i < toPush.length; i++) {
     const summary = toPush[i];
     onProgress?.({ phase: "push", done: i + 1, total: toPush.length, name: summary.name });
@@ -113,12 +151,27 @@ export async function sync(
     }
   }
 
+  // The server dropped its Strava copy of anything just uploaded as a file;
+  // drop this browser's copy too rather than waiting for the next sync.
+  const uploaded = toPush.filter((r) => !result.failed.some((f) => f.id === r.id));
+  const superseded = new Set<string>();
+  for (const r of local) {
+    if (r.source === "strava" && uploaded.some((f) => f.id !== r.id && isSameRide(f, r))) {
+      await deleteRide(r.id);
+      superseded.add(r.id);
+      result.removed++;
+    }
+  }
+
   // Rides the server already has, but whose analysis has moved on here. Sent
   // without streams: the samples have not changed and re-uploading a megabyte
   // per ride to correct six floats would make correcting anything unthinkable.
+  const pushedIds = new Set(toPush.map((r) => r.id));
   const toUpdate = local.filter((r) => {
     const there = byId.get(r.id);
-    return there !== undefined && differs(r, there);
+    return (
+      there !== undefined && !pushedIds.has(r.id) && !superseded.has(r.id) && differs(r, there)
+    );
   });
   for (let i = 0; i < toUpdate.length; i++) {
     const summary = toUpdate[i];
@@ -136,7 +189,13 @@ export async function sync(
     }
   }
 
-  const toPull = remote.filter((r) => !localIds.has(r.id));
+  // A Strava copy of a ride this browser holds as a file is about to be
+  // superseded by that file; pulling it down would only duplicate the ride.
+  const toPull = remote.filter(
+    (r) =>
+      !localIds.has(r.id) &&
+      !(r.source === "strava" && localFiles.some((f) => isSameRide(f, r))),
+  );
   for (let i = 0; i < toPull.length; i++) {
     const ride = toPull[i];
     onProgress?.({ phase: "pull", done: i + 1, total: toPull.length, name: ride.name });
@@ -165,6 +224,10 @@ export async function sync(
 
       await saveRide({
         curve: buildPowerCurve(watts).watts,
+        origin: {
+          source: ride.source === "strava" ? "strava" : "file",
+          stravaActivityId: ride.stravaActivityId ?? null,
+        },
         ride: {
           streams,
           meta,
