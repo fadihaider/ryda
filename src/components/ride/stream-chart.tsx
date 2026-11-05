@@ -3,14 +3,15 @@
 import { useEffect, useRef } from "react";
 import uPlot from "uplot";
 import type { CursorStore, Selection } from "@/lib/cursor-store";
+import { formatStop, type PauseAxis } from "@/lib/analysis/pause-axis";
 import "uplot/dist/uPlot.min.css";
 
 export interface StreamChartProps {
   label: string;
   /** CSS custom property holding this channel's colour, e.g. "--ch-power". */
   colorToken: string;
-  /** Shared x axis — elapsed seconds or cumulative metres. */
-  x: Float64Array;
+  /** Shared x axis — riding time with stops squeezed, or cumulative metres. */
+  axis: PauseAxis;
   y: Float32Array | Float64Array;
   unit: string;
   height?: number;
@@ -23,7 +24,12 @@ export interface StreamChartProps {
   syncKey: string;
   onSelect?: (selection: Selection | null) => void;
   xIsDistance: boolean;
+  /** Print each stop's length on its band. Once per stack is enough. */
+  labelStops?: boolean;
 }
+
+/** Width of a stop on the distance axis, where it has no length of its own. */
+const DISTANCE_STOP_PX = 4;
 
 function cssVar(name: string, el: HTMLElement): string {
   return getComputedStyle(el).getPropertyValue(name).trim();
@@ -32,7 +38,7 @@ function cssVar(name: string, el: HTMLElement): string {
 export function StreamChart({
   label,
   colorToken,
-  x,
+  axis,
   y,
   unit,
   height = 96,
@@ -42,6 +48,7 @@ export function StreamChart({
   syncKey,
   onSelect,
   xIsDistance,
+  labelStops = false,
 }: StreamChartProps) {
   const hostRef = useRef<HTMLDivElement>(null);
   const readoutRef = useRef<HTMLSpanElement>(null);
@@ -58,11 +65,14 @@ export function StreamChart({
     const color = cssVar(colorToken, host) || "#888";
     const ink = cssVar("--ink-muted", host) || "#888";
     const grid = cssVar("--line-grid", host) || "#333";
-    const axis = cssVar("--line-axis", host) || "#444";
+    const axisLine = cssVar("--line-axis", host) || "#444";
 
+    // Pause filler becomes null, which uPlot draws as a gap rather than the
+    // flat line of held values the samples actually contain.
+    const hidden = axis.hidden;
     const data: uPlot.AlignedData = [
-      x as unknown as number[],
-      y as unknown as number[],
+      axis.x as unknown as number[],
+      hidden ? Array.from(y, (v, i) => (hidden[i] ? null : v)) : (y as unknown as number[]),
     ];
 
     const plot = new uPlot(
@@ -84,12 +94,12 @@ export function StreamChart({
           {
             stroke: ink,
             grid: { stroke: grid, width: 1 },
-            ticks: { stroke: axis, width: 1 },
+            ticks: { stroke: axisLine, width: 1 },
             font: "11px var(--font-sans, system-ui)",
             size: 26,
             values: (_u, splits) =>
               splits.map((v) =>
-                xIsDistance ? `${(v / 1000).toFixed(0)}km` : formatClock(v),
+                xIsDistance ? `${(v / 1000).toFixed(0)}km` : formatClock(axis.toRiding(v)),
               ),
           },
           {
@@ -110,6 +120,7 @@ export function StreamChart({
           },
         ],
         hooks: {
+          draw: [(u) => drawStops(u, axis, ink, labelStops)],
           setCursor: [
             (u) => {
               cursor.set(u.cursor.idx ?? null);
@@ -151,7 +162,8 @@ export function StreamChart({
         node.textContent = "—";
         return;
       }
-      node.textContent = format(y[idx]);
+      const stopped = hidden?.[idx] ? axis.stopSeconds?.[idx] : undefined;
+      node.textContent = stopped ? `stopped ${formatStop(stopped)}` : format(y[idx]);
     });
 
     return () => {
@@ -160,7 +172,7 @@ export function StreamChart({
       plot.destroy();
       plotRef.current = null;
     };
-  }, [x, y, colorToken, height, fill, cursor, syncKey, format, xIsDistance]);
+  }, [axis, y, colorToken, height, fill, cursor, syncKey, format, xIsDistance, labelStops]);
 
   return (
     <div className="border-t border-hairline first:border-t-0">
@@ -185,6 +197,42 @@ export function StreamChart({
       <div ref={hostRef} className="w-full" style={{ height }} />
     </div>
   );
+}
+
+/** Shade each stop, and label it when there is room. */
+function drawStops(u: uPlot, axis: PauseAxis, ink: string, label: boolean) {
+  if (axis.stops.length === 0) return;
+  const ctx = u.ctx;
+  const { top, height } = u.bbox;
+  const dpr = devicePixelRatio || 1;
+  let labelledTo = -Infinity;
+
+  ctx.save();
+  ctx.fillStyle = withAlpha(ink, 0.12);
+  ctx.font = `${10 * dpr}px system-ui, sans-serif`;
+  ctx.textAlign = "center";
+  for (const stop of axis.stops) {
+    let x0 = u.valToPos(stop.x, "x", true);
+    let x1 = u.valToPos(stop.x + stop.width, "x", true);
+    if (stop.width === 0) {
+      x0 -= (DISTANCE_STOP_PX * dpr) / 2;
+      x1 = x0 + DISTANCE_STOP_PX * dpr;
+    }
+    ctx.fillRect(x0, top, x1 - x0, height);
+
+    if (!label) continue;
+    // Stops close together would print over each other; the band still shows,
+    // and hovering it reads out the length.
+    const text = formatStop(stop.seconds);
+    const half = ctx.measureText(text).width / 2;
+    const cx = (x0 + x1) / 2;
+    if (cx - half < labelledTo + 4 * dpr) continue;
+    ctx.fillStyle = ink;
+    ctx.fillText(text, cx, top + 10 * dpr);
+    ctx.fillStyle = withAlpha(ink, 0.12);
+    labelledTo = cx + half;
+  }
+  ctx.restore();
 }
 
 function formatClock(seconds: number): string {

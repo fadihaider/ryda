@@ -17,6 +17,7 @@ import { ZONE_SMOOTH_HALF_WINDOW } from "@/lib/analysis/zones";
 import { RiderSettingsPanel } from "./rider-settings-panel";
 import { RideMapLoader } from "./map-loader";
 import { StreamChart } from "./stream-chart";
+import { buildPauseAxis } from "@/lib/analysis/pause-axis";
 import { ConfidenceChip } from "./confidence-chip";
 import { StatRow } from "./stat-row";
 import { ZonePanel } from "./zone-panel";
@@ -86,7 +87,10 @@ export function RideView({
     [streams, meta, profile],
   );
 
-  const x = xIsDistance ? streams.distance : streams.time;
+  const axis = useMemo(
+    () => buildPauseAxis(xIsDistance ? streams.distance : streams.time, streams.paused, xIsDistance),
+    [xIsDistance, streams.distance, streams.time, streams.paused],
+  );
 
   // Selecting a range recomputes every statistic for just that range. This is
   // the thing that makes a ride analyser feel alive, and Strava has no
@@ -238,7 +242,7 @@ export function RideView({
           <StreamChart
             label="Elevation"
             colorToken="--ch-elevation-line"
-            x={x}
+            axis={axis}
             y={streams.altitude}
             unit="m"
             fill
@@ -247,11 +251,12 @@ export function RideView({
             syncKey="ride"
             onSelect={setSelection}
             xIsDistance={xIsDistance}
+            labelStops
           />
           <StreamChart
             label="Power (estimated)"
             colorToken="--ch-power"
-            x={x}
+            axis={axis}
             y={power.watts}
             unit="W"
             cursor={cursor}
@@ -263,7 +268,7 @@ export function RideView({
             <StreamChart
               label="Heart rate"
               colorToken="--ch-hr"
-              x={x}
+              axis={axis}
               y={streams.heartrate}
               unit="bpm"
               cursor={cursor}
@@ -276,7 +281,7 @@ export function RideView({
             <StreamChart
               label="Cadence"
               colorToken="--ch-cadence"
-              x={x}
+              axis={axis}
               y={streams.cadence}
               unit="rpm"
               cursor={cursor}
@@ -289,7 +294,7 @@ export function RideView({
             <StreamChart
               label="Speed"
               colorToken="--ch-speed"
-              x={x}
+              axis={axis}
               y={streams.speed}
               unit="km/h"
               format={(v) => (v * 3.6).toFixed(1)}
@@ -303,7 +308,7 @@ export function RideView({
             <StreamChart
               label="W′ balance"
               colorToken="--ch-wbal"
-              x={x}
+              axis={axis}
               y={wBalanceKj}
               unit="kJ"
               format={(v) => v.toFixed(1)}
